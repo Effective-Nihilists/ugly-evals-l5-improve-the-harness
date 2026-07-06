@@ -1,0 +1,16 @@
+{
+  "name": "l5-improve-the-harness",
+  "kind": "planning",
+  "level": 5,
+  "turns": [
+    "Read TICKET.md, then review the real harness code under harness-snapshot/ and research the current state of the art in coding-agent evaluation. Produce DESIGN.md at the repo root: a concrete, prioritized, research-grounded design for how to make ugly-code the best possible coding-agent harness, citing specific mechanisms in the snapshot and naming their weaknesses."
+  ],
+  "ticketPath": "TICKET.md",
+  "budget": { "maxTurns": 40, "maxCostUsd": 4, "timeoutMs": 1200000 },
+  "successCriteria": "DESIGN.md exists at the repo root and is a strong, prioritized design for improving ugly-code as a coding-agent harness. It must (a) accurately read the real snapshot code — citing concrete mechanisms such as the derived-vs-authored difficulty in registry.ts, how judge gates gather evidence in grader.ts, the no-edit nudge and resume-on-error in evalRun.ts, or the fail_to_pass/pass_to_pass path in sbpGrader.ts — and name real weaknesses; (b) be grounded in specific, real current research/benchmarks (e.g. SWE-bench / SWE-bench-Pro / Terminal-Bench, judge reliability, contamination, reward hacking); (c) propose prioritized, feasible improvements tied to concrete limitations, distinguishing quick wins from larger bets; and (d) surface at least one non-obvious lever. Graded by an LLM judge on depth, accuracy, grounding, prioritization, feasibility, and insight.",
+  "gates": [
+    { "name": "DESIGN.md produced", "points": 1, "kind": "fileExists:DESIGN.md" },
+    { "name": "harness design quality", "points": 4, "kind": "judge:harness-design-rubric", "description": "Score 0-4 the DESIGN.md. Award points only for: accurate, specific reading of the real harness-snapshot code (cites concrete files/mechanisms and real weaknesses, not generic advice); grounding in real, current coding-agent-eval research/benchmarks; prioritized, feasible improvements tied to concrete limitations (quick wins vs larger bets); and at least one non-obvious insight. Deduct for hand-waving, invented facts about the code, greenfield-rewrite proposals, or research name-drops with no substance." }
+  ],
+  "tags": ["planning", "design-doc", "research", "self-improvement", "agentic", "cross-review"]
+}
