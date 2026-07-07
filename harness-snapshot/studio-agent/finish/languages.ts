@@ -279,7 +279,53 @@ const PYTHON_ADAPTER: GateAdapter = {
 };
 
 // Declaration order == priority order: Node/TS primary, Python secondary.
-const ADAPTERS: readonly GateAdapter[] = [NODE_ADAPTER, PYTHON_ADAPTER];
+// Generic project-declared verify — a LANGUAGE-AGNOSTIC fallback so ANY project
+// (Rust, Go, Zig, C++, …) can join the verify loop just by declaring how it checks
+// itself, without a dedicated adapter. Detection + resolution look for a Makefile /
+// justfile `check|typecheck|build` target or a package.json `check|verify` script.
+// No spawning here (probe only). This keeps the coding agent's turn-end verify gate
+// universal instead of ts/js/python-only. Adding a first-class language later just
+// means inserting a richer adapter before this one.
+async function genericDetected(cwd: string): Promise<boolean> {
+  return (
+    (await exists(join(cwd, 'Makefile'))) ||
+    (await exists(join(cwd, 'justfile'))) ||
+    (await exists(join(cwd, 'package.json')))
+  );
+}
+async function genericTypecheck(cwd: string): Promise<AdapterCommand | null> {
+  const mk = await readFileOrNull(join(cwd, 'Makefile'));
+  if (mk) {
+    for (const t of ['check', 'typecheck', 'build']) {
+      if (new RegExp(`^${t}:`, 'm').test(mk)) return { label: `make ${t}`, command: 'make', args: [t] };
+    }
+  }
+  const jf = await readFileOrNull(join(cwd, 'justfile'));
+  if (jf) {
+    for (const t of ['check', 'typecheck', 'build']) {
+      if (new RegExp(`^${t}:`, 'm').test(jf)) return { label: `just ${t}`, command: 'just', args: [t] };
+    }
+  }
+  const pkg = await readPackageJson(cwd);
+  const scripts = pkg?.scripts ?? {};
+  for (const name of ['check', 'verify']) {
+    if (typeof scripts[name] === 'string') {
+      const pm = await detectPackageManager(cwd);
+      return { label: `${pm} run ${name}`, command: pm, args: ['run', name] };
+    }
+  }
+  return null;
+}
+const GENERIC_ADAPTER: GateAdapter = {
+  detected: genericDetected,
+  typecheck: genericTypecheck,
+  lint: () => Promise.resolve(null),
+  test: () => Promise.resolve(null),
+};
+
+// Declaration order == priority order: Node/TS primary, Python secondary, then the
+// language-agnostic project-declared fallback (Makefile/justfile/npm check).
+const ADAPTERS: readonly GateAdapter[] = [NODE_ADAPTER, PYTHON_ADAPTER, GENERIC_ADAPTER];
 
 /**
  * Walk detected languages (primary first) and return the first non-null result
@@ -318,4 +364,18 @@ export async function resolveTestGate(
   cwd: string,
 ): Promise<AdapterCommand | null> {
   return resolveGate(cwd, (a, c) => a.test(c));
+}
+
+/**
+ * The best available "does this project still build / typecheck" gate for the coding
+ * agent's turn-end execution-feedback loop. Universal across languages: Node `tsc`,
+ * Python `pyright`/`mypy`, or a project-declared `make`/`just`/`npm` check for anything
+ * else. `null` when nothing resolves — the loop then skips verification (an unknown
+ * language is never blocked, just unverified). Fast by design (typecheck, not the full
+ * test suite) so it can run every time a turn settles after edits.
+ */
+export async function resolveVerifyGate(
+  cwd: string,
+): Promise<AdapterCommand | null> {
+  return resolveTypecheckGate(cwd);
 }

@@ -59,6 +59,7 @@ import { native } from 'ugly-app/native';
 import { getCodingAgentModels } from 'ugly-app/shared';
 import { filterToolsByToolset, type Toolset } from './toolsets';
 import { spawnCollect } from '../../agent/tools/spawn';
+import { resolveVerifyGate } from './finish/languages';
 
 // Per-session toolset override (e.g. the CLI's `--toolset no-python` A/B). Read by
 // the live `tools` getter; set before the first turn. Session-scoped map so it
@@ -86,6 +87,50 @@ export function setSessionEval(sessionId: string, isEval: boolean): void {
 const maxTurnsBySession = new Map<string, number>();
 export function setSessionMaxTurns(sessionId: string, maxTurns: number): void {
   if (Number.isFinite(maxTurns) && maxTurns > 0) maxTurnsBySession.set(sessionId, Math.floor(maxTurns));
+}
+
+// ── Turn-end execution feedback loop ─────────────────────────────────────────
+// When a turn settles (the model stops calling tools) AFTER edits, run the project's
+// verify gate (typecheck — universal via resolveVerifyGate: Node tsc, Python pyright,
+// or a project-declared make/just/npm check for any other language) and, on failure,
+// inject the errors so the model fixes them before the turn ends. Bounded by a
+// per-session continue cap and by the loop's own maxTurns/budget. Opt out with
+// UGLY_AGENT_VERIFY=0. This is the harness's #1 correctness lever — see HARNESS.md.
+const editedSinceVerifyBySession = new Map<string, boolean>();
+const verifyContinuesBySession = new Map<string, number>();
+const MAX_VERIFY_CONTINUES = 3;
+
+function headTail(s: string, max = 6000): string {
+  if (s.length <= max) return s;
+  const half = Math.floor(max / 2);
+  return `${s.slice(0, half)}\n…[${s.length - max} chars omitted]…\n${s.slice(-half)}`;
+}
+
+/** Runs at turn-settle: verify the project still typechecks after the turn's edits.
+ *  Returns a fix-me message (to continue the turn) or null (to let it finish). */
+async function verifyOnSettle(sessionId: string): Promise<string | null> {
+  if (process.env.UGLY_AGENT_VERIFY === '0') return null;
+  if (!editedSinceVerifyBySession.get(sessionId)) return null; // no edits since last check
+  editedSinceVerifyBySession.set(sessionId, false); // consume; a new edit re-arms it
+  const continues = verifyContinuesBySession.get(sessionId) ?? 0;
+  if (continues >= MAX_VERIFY_CONTINUES) return null; // stop nudging; let the turn end
+  const ws = getSessionWorkspace(sessionId);
+  const cwd = (ws?.isWorktree ? ws.dir : getActiveProjectPath()) ?? '';
+  if (!cwd) return null;
+  let gate: Awaited<ReturnType<typeof resolveVerifyGate>>;
+  try { gate = await resolveVerifyGate(cwd); } catch { return null; }
+  if (!gate) return null; // no verify command for this project/language → skip, never block
+  let out = '';
+  let code: number | null = 0;
+  try {
+    const r = await spawnCollect(gate.command, gate.args, { cwd });
+    out = `${r.stdout}\n${r.stderr}`.trim();
+    code = r.code;
+  } catch { return null; } // gate couldn't run (missing tool) → don't block the turn
+  debugLog(sessionId, 'verify', { gate: gate.label, code, ok: code === 0, attempt: continues + 1 });
+  if (code === 0) { verifyContinuesBySession.set(sessionId, 0); return null; } // clean → finish
+  verifyContinuesBySession.set(sessionId, continues + 1);
+  return `[automated verification] Your edits do not pass \`${gate.label}\` — do not end your turn with a broken build. Fix the errors below, then finish:\n\n${headTail(out)}`;
 }
 
 /** No-tools LLM completion for the criteria grader — the same governed,
@@ -840,6 +885,12 @@ function getOrCreate(sessionId: string, emit: Emit, selection?: AgentSelection, 
       keepRecentTurns: 8,
       summarize: (dropped) => buildCompactionSummary(state.taskText, dropped, agentStepJudge),
     },
+    // Turn-end execution feedback: when the model tries to finish after edits, run the
+    // project's verify gate and, on failure, inject the errors to continue the turn so
+    // it fixes a broken build before ending. Universal + gracefully skipped — see
+    // verifyOnSettle / resolveVerifyGate. Peer sub-sessions skip it (they don't own
+    // the workspace verification; the parent turn does).
+    ...(opts?.peer ? {} : { onSettle: () => verifyOnSettle(sessionId) }),
     // Live token streaming: create the assistant bubble on the first token, then
     // update it in place as text arrives (onTurn finalizes it authoritatively).
     onText: (_msgId, delta) => {
@@ -892,6 +943,10 @@ function getOrCreate(sessionId: string, emit: Emit, selection?: AgentSelection, 
         ...(telemetry ? { inputTokens: telemetry.inputTokens, outputTokens: telemetry.outputTokens, cacheReadTokens: telemetry.cacheReadTokens, costUsd: telemetry.costUsd } : {}),
         msgCount: state.messageCount,
       });
+      // Arm the turn-end verify gate when this turn edited source (see verifyOnSettle).
+      if (content.some((b) => b.type === 'tool_use' && ['write', 'edit', 'multiedit'].includes((b as { name?: string }).name ?? ''))) {
+        editedSinceVerifyBySession.set(sessionId, true);
+      }
     },
     onEvent: (e) => {
       if (e.type === 'tool_result') {

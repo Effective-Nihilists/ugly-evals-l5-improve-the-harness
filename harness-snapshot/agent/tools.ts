@@ -247,10 +247,14 @@ function runDb(ctx: ToolContext | undefined, op: string, input: Record<string, u
   });
 }
 
-/** Keep tool results bounded so a huge result set doesn't blow the context. */
+/** Keep tool results bounded so a huge result set doesn't blow the context. Head+tail,
+ *  not head-only: compilers and test runners put the summary line + failing traceback
+ *  at the END, so a head-only cut hides the actual failure the model needs. Keep both ends. */
 function truncate(s: string): string {
   const MAX = 12_000;
-  return s.length > MAX ? s.slice(0, MAX) + `\n…[truncated ${s.length - MAX} chars]` : s;
+  if (s.length <= MAX) return s;
+  const half = Math.floor(MAX / 2);
+  return `${s.slice(0, half)}\n…[truncated ${s.length - MAX} chars from the middle]…\n${s.slice(-half)}`;
 }
 
 // `.uglyapp.projectId` per project dir — read once, cached (it never changes for
@@ -422,7 +426,7 @@ function runBash(
       proc.onStdout((c) => (out += c));
       proc.onStderr((c) => (out += c));
       proc.onError((e) => { settle(`${out}\n[error: ${e}]`); });
-      proc.onExit((code) => { settle(`${out.trimEnd()}\n[exit ${code ?? 'null'}]`); });
+      proc.onExit((code) => { settle(truncate(`${out.trimEnd()}\n[exit ${code ?? 'null'}]`)); });
     } catch (e) {
       console.error('[agentTools:runBash]', JSON.stringify({ command, workingDir, projectDir: ctx?.projectDir, error: e instanceof Error ? e.message : String(e) }), e instanceof Error ? e.stack : undefined);
       resolve(`[error: ${(e as Error).message}]`);
